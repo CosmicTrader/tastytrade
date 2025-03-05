@@ -4,7 +4,9 @@ API_URL = "https://api.tastyworks.com"
 BACKTEST_URL = "https://backtester.vast.tastyworks.com"
 CERT_URL = "https://api.cert.tastyworks.com"
 VAST_URL = "https://vast.tastyworks.com"
-VERSION = "9.6"
+VERSION = "9.10"
+
+__version__ = VERSION
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

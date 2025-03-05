@@ -24,7 +24,7 @@ from tastytrade.utils import (
     PriceEffect,
     TastytradeError,
     TastytradeJsonDataclass,
-    _set_sign_for,
+    set_sign_for,
     today_in_new_york,
     validate_response,
 )
@@ -77,6 +77,7 @@ class AccountBalance(TastytradeJsonDataclass):
     equity_offering_margin_requirement: Decimal
     long_bond_value: Decimal
     bond_margin_requirement: Decimal
+    used_derivative_buying_power: Decimal
     snapshot_date: date
     reg_t_margin_requirement: Decimal
     futures_overnight_margin_requirement: Decimal
@@ -97,7 +98,7 @@ class AccountBalance(TastytradeJsonDataclass):
             effect = data.get("unsettled-cryptocurrency-fiat-effect")
             if effect == PriceEffect.DEBIT:
                 data[key] = -abs(Decimal(data[key]))
-        return _set_sign_for(data, ["pending_cash", "buying_power_adjustment"])
+        return set_sign_for(data, ["pending_cash", "buying_power_adjustment"])
 
 
 class AccountBalanceSnapshot(TastytradeJsonDataclass):
@@ -142,6 +143,7 @@ class AccountBalanceSnapshot(TastytradeJsonDataclass):
     equity_offering_margin_requirement: Optional[Decimal] = None
     long_bond_value: Optional[Decimal] = None
     bond_margin_requirement: Optional[Decimal] = None
+    used_derivative_buying_power: Optional[Decimal] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -151,7 +153,7 @@ class AccountBalanceSnapshot(TastytradeJsonDataclass):
             effect = data.get("unsettled-cryptocurrency-fiat-effect")
             if effect == PriceEffect.DEBIT:
                 data[key] = -abs(Decimal(data[key]))
-        return _set_sign_for(data, ["pending_cash"])
+        return set_sign_for(data, ["pending_cash"])
 
 
 class CurrentPosition(TastytradeJsonDataclass):
@@ -190,7 +192,7 @@ class CurrentPosition(TastytradeJsonDataclass):
     @model_validator(mode="before")
     @classmethod
     def validate_price_effects(cls, data: Any) -> Any:
-        return _set_sign_for(data, ["realized_day_gain", "realized_today"])
+        return set_sign_for(data, ["realized_day_gain", "realized_today"])
 
 
 class FeesInfo(TastytradeJsonDataclass):
@@ -199,7 +201,7 @@ class FeesInfo(TastytradeJsonDataclass):
     @model_validator(mode="before")
     @classmethod
     def validate_price_effects(cls, data: Any) -> Any:
-        return _set_sign_for(data, ["total_fees"])
+        return set_sign_for(data, ["total_fees"])
 
 
 class Lot(TastytradeJsonDataclass):
@@ -241,7 +243,7 @@ class MarginReportEntry(TastytradeJsonDataclass):
     @model_validator(mode="before")
     @classmethod
     def validate_price_effects(cls, data: Any) -> Any:
-        return _set_sign_for(
+        return set_sign_for(
             data,
             [
                 "buying_power",
@@ -275,7 +277,7 @@ class MarginReport(TastytradeJsonDataclass):
     @model_validator(mode="before")
     @classmethod
     def validate_price_effects(cls, data: Any) -> Any:
-        return _set_sign_for(
+        return set_sign_for(
             data,
             [
                 "maintenance_requirement",
@@ -437,7 +439,7 @@ class Transaction(TastytradeJsonDataclass):
     @model_validator(mode="before")
     @classmethod
     def validate_price_effects(cls, data: Any) -> Any:
-        return _set_sign_for(
+        return set_sign_for(
             data,
             [
                 "value",
@@ -1132,8 +1134,7 @@ class Account(TastytradeJsonDataclass):
         if symbol:
             symbol = symbol.replace("/", "%2F")
         data = await session._a_get(
-            f"/accounts/{self.account_number}/margin-"
-            f"requirements/{symbol}/effective"
+            f"/accounts/{self.account_number}/margin-requirements/{symbol}/effective"
         )
         return MarginRequirement(**data)
 
@@ -1150,8 +1151,7 @@ class Account(TastytradeJsonDataclass):
         if symbol:
             symbol = symbol.replace("/", "%2F")
         data = session._get(
-            f"/accounts/{self.account_number}/margin-"
-            f"requirements/{symbol}/effective"
+            f"/accounts/{self.account_number}/margin-requirements/{symbol}/effective"
         )
         return MarginRequirement(**data)
 

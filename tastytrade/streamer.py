@@ -41,7 +41,7 @@ from tastytrade.order import (
     PlacedOrder,
 )
 from tastytrade.session import Session
-from tastytrade.utils import TastytradeError, TastytradeJsonDataclass, _set_sign_for
+from tastytrade.utils import TastytradeError, TastytradeJsonDataclass, set_sign_for
 from tastytrade.watchlists import Watchlist
 
 CERT_STREAMER_URL = "wss://streamer.cert.tastyworks.com"
@@ -87,7 +87,7 @@ class UnderlyingYearGainSummary(TastytradeJsonDataclass):
     @model_validator(mode="before")
     @classmethod
     def validate_price_effects(cls, data: Any) -> Any:
-        return _set_sign_for(
+        return set_sign_for(
             data,
             [
                 "fees",
@@ -209,6 +209,8 @@ class AlertStreamer:
         self.reconnect_fn = reconnect_fn
         #: Variable number of arguments to pass to the reconnect function
         self.reconnect_args = reconnect_args
+        #: The proxy URL, if any, associated with the session
+        self.proxy = session.proxy
 
         self._queues: dict[str, Queue] = defaultdict(Queue)
         self._websocket: Optional[ClientConnection] = None
@@ -242,6 +244,7 @@ class AlertStreamer:
             self._reconnect_task.cancel()
             tasks.append(self._reconnect_task)
         await asyncio.gather(*tasks)
+        await self._websocket.wait_closed()  # type: ignore
 
     async def _connect(self) -> None:
         """
@@ -250,7 +253,9 @@ class AlertStreamer:
         """
         headers = {"Authorization": f"Bearer {self.token}"}
         reconnecting = False
-        async for websocket in connect(self.base_url, additional_headers=headers):
+        async for websocket in connect(
+            self.base_url, additional_headers=headers, proxy=self.proxy
+        ):
             self._websocket = websocket
             self._heartbeat_task = asyncio.create_task(self._heartbeat())
             logger.debug("Websocket connection established.")
@@ -386,6 +391,7 @@ class DXLinkStreamer:
     def __init__(
         self,
         session: Session,
+        refresh_interval: float = 0.1,
         reconnect_args: tuple[Any, ...] = (),
         reconnect_fn: Optional[Callable[..., Coroutine[Any, Any, None]]] = None,
         ssl_context: SSLContext = create_default_context(),
@@ -403,11 +409,16 @@ class DXLinkStreamer:
             "Underlying": 17,
         }
         self._subscription_state: dict[str, str] = defaultdict(lambda: "CHANNEL_CLOSED")
+        #: Time in seconds between fetching new events from dxfeed. You can try a higher
+        #: value if processing quote updates quickly is not a high priority.
+        self.refresh_interval = refresh_interval
         #: An async function to be called upon reconnection. The first argument must be
         #: of type `DXLinkStreamer` and will be a reference to the streamer object.
         self.reconnect_fn = reconnect_fn
         #: Variable number of arguments to pass to the reconnect function
         self.reconnect_args = reconnect_args
+        #: The proxy URL, if any, associated with the session
+        self.proxy = session.proxy
 
         self._authenticated = False
         self._wss_url = session.dxlink_url
@@ -443,6 +454,7 @@ class DXLinkStreamer:
             self._reconnect_task.cancel()
             tasks.append(self._reconnect_task)
         await asyncio.gather(*tasks)
+        await self._websocket.wait_closed()
 
     async def _connect(self) -> None:
         """
@@ -450,7 +462,9 @@ class DXLinkStreamer:
         authorization token provided during initialization.
         """
         reconnecting = False
-        async for websocket in connect(self._wss_url, ssl=self._ssl_context):
+        async for websocket in connect(
+            self._wss_url, ssl=self._ssl_context, proxy=self.proxy
+        ):
             self._websocket = websocket
             await self._setup_connection()
             try:
@@ -645,7 +659,7 @@ class DXLinkStreamer:
         message = {
             "type": "FEED_SETUP",
             "channel": self._channels[event_type],
-            "acceptAggregationPeriod": 10,
+            "acceptAggregationPeriod": self.refresh_interval,
             "acceptDataFormat": "COMPACT",
         }
 

@@ -1,10 +1,17 @@
 from datetime import date, datetime
 from typing import Any, Optional, Union
+from typing_extensions import Self
 
-import httpx
+import json
+from httpx import AsyncClient, Client
 
 from tastytrade import API_URL, CERT_URL
-from tastytrade.utils import TastytradeError, TastytradeJsonDataclass, validate_response
+from tastytrade.utils import (
+    TastytradeError,
+    TastytradeJsonDataclass,
+    validate_and_parse,
+    validate_response,
+)
 
 
 class Address(TastytradeJsonDataclass):
@@ -259,7 +266,7 @@ class Session:
     Contains a local user login which can then be used to interact with the
     remote API.
 
-    :param login: tastytrade username or email
+    :param login: Tastytrade username or email
     :param remember_me:
         whether or not to create a remember token to use instead of a password
     :param password:
@@ -273,6 +280,9 @@ class Session:
         user's device
     :param dxfeed_tos_compliant:
         whether to use the dxfeed TOS-compliant API endpoint for the streamer
+    :param proxy:
+        if provided, all requests will be made through this proxy, as well as
+        web socket connections for streamers.
     """
 
     def __init__(
@@ -284,6 +294,7 @@ class Session:
         is_test: bool = False,
         two_factor_authentication: Optional[str] = None,
         dxfeed_tos_compliant: bool = False,
+        proxy: Optional[str] = None,
     ):
         body = {"login": login, "remember-me": remember_me}
         if password is not None:
@@ -296,14 +307,16 @@ class Session:
             )
         #: Whether this is a cert or real session
         self.is_test = is_test
+        #: Proxy URL to use for requests and web sockets
+        self.proxy = proxy
         # The headers to use for API requests
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
         #: httpx client for sync requests
-        self.sync_client = httpx.Client(
-            base_url=(CERT_URL if is_test else API_URL), headers=headers
+        self.sync_client = Client(
+            base_url=(CERT_URL if is_test else API_URL), headers=headers, proxy=proxy
         )
         if two_factor_authentication is not None:
             response = self.sync_client.post(
@@ -313,20 +326,19 @@ class Session:
             )
         else:
             response = self.sync_client.post("/sessions", json=body)
-        validate_response(response)  # throws exception if not 200
-
-        json = response.json()
+        data = validate_and_parse(response)
         #: The user dict returned by the API; contains basic user information
-        self.user = User(**json["data"]["user"])
+        self.user = User(**data["user"])
         #: The session token used to authenticate requests
-        self.session_token = json["data"]["session-token"]
+        self.session_token = data["session-token"]
         #: A single-use token which can be used to login without a password
-        self.remember_token = json["data"].get("remember-token")
+        self.remember_token = data.get("remember-token")
         self.sync_client.headers.update({"Authorization": self.session_token})
-        self.validate()
         #: httpx client for async requests
-        self.async_client = httpx.AsyncClient(
-            base_url=self.sync_client.base_url, headers=self.sync_client.headers.copy()
+        self.async_client = AsyncClient(
+            base_url=self.sync_client.base_url,
+            headers=self.sync_client.headers.copy(),
+            proxy=proxy,
         )
 
         # Pull streamer tokens and urls
@@ -341,13 +353,19 @@ class Session:
         #: URL for dxfeed websocket
         self.dxlink_url = data["dxlink-url"]
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.destroy()
+
     async def _a_get(self, url, **kwargs) -> dict[str, Any]:
         response = await self.async_client.get(url, timeout=30, **kwargs)
-        return self._validate_and_parse(response)
+        return validate_and_parse(response)
 
     def _get(self, url, **kwargs) -> dict[str, Any]:
         response = self.sync_client.get(url, timeout=30, **kwargs)
-        return self._validate_and_parse(response)
+        return validate_and_parse(response)
 
     async def _a_delete(self, url, **kwargs) -> None:
         response = await self.async_client.delete(url, **kwargs)
@@ -359,23 +377,19 @@ class Session:
 
     async def _a_post(self, url, **kwargs) -> dict[str, Any]:
         response = await self.async_client.post(url, **kwargs)
-        return self._validate_and_parse(response)
+        return validate_and_parse(response)
 
     def _post(self, url, **kwargs) -> dict[str, Any]:
         response = self.sync_client.post(url, **kwargs)
-        return self._validate_and_parse(response)
+        return validate_and_parse(response)
 
     async def _a_put(self, url, **kwargs) -> dict[str, Any]:
         response = await self.async_client.put(url, **kwargs)
-        return self._validate_and_parse(response)
+        return validate_and_parse(response)
 
     def _put(self, url, **kwargs) -> dict[str, Any]:
         response = self.sync_client.put(url, **kwargs)
-        return self._validate_and_parse(response)
-
-    def _validate_and_parse(self, response: httpx._models.Response) -> dict[str, Any]:
-        validate_response(response)
-        return response.json()["data"]
+        return validate_and_parse(response)
 
     async def a_validate(self) -> bool:
         """
@@ -440,3 +454,36 @@ class Session:
         """
         data = self._get("/users/me/two-factor-method")
         return TwoFactorInfo(**data)
+
+    def serialize(self) -> str:
+        """
+        Serializes the session to a string, useful for storing
+        a session for later use.
+        Could be used with pickle, Redis, etc.
+        """
+        attrs = self.__dict__.copy()
+        del attrs["async_client"]
+        del attrs["sync_client"]
+        attrs["user"] = attrs["user"].model_dump()
+        return json.dumps(attrs)
+
+    @classmethod
+    def deserialize(cls, serialized: str) -> Self:
+        """
+        Create a new Session object from a serialized string.
+        """
+        deserialized = json.loads(serialized)
+        deserialized["user"] = User(**deserialized["user"])
+        self = cls.__new__(cls)
+        self.__dict__ = deserialized
+        base_url = CERT_URL if self.is_test else API_URL
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": self.session_token,
+        }
+        self.sync_client = Client(base_url=base_url, headers=headers, proxy=self.proxy)
+        self.async_client = AsyncClient(
+            base_url=base_url, headers=headers, proxy=self.proxy
+        )
+        return self
